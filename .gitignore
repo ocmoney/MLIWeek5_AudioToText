@@ -42,4 +42,5 @@ Thumbs.db
 /artifacts
 /spectrogram_images
 /wandb
-/mel_spectrograms_cleanmel_spectrograms_clean/
+/mel_spectrograms_clean
+/clean_spectogram/mel_spectrograms_clean
