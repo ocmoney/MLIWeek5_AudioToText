@@ -38,3 +38,7 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db 
+
+/artifacts
+/spectrogram_images
+/wandb
