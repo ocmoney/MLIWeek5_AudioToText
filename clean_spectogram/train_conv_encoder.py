@@ -1,34 +1,49 @@
 import os
 import random
-from PIL import Image
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
 import numpy as np
 from tqdm import tqdm
 
 # --- Dataset ---
 class MelSpectrogramDataset(Dataset):
-    def __init__(self, img_dir, files, class_to_idx, transform=None):
-        self.img_dir = img_dir
+    def __init__(self, data_dir, files, class_to_idx, target_length=128):
+        self.data_dir = data_dir
         self.files = files
         self.class_to_idx = class_to_idx
-        self.transform = transform
+        self.target_length = target_length
 
     def __len__(self):
         return len(self.files)
 
     def __getitem__(self, idx):
-        img_name = self.files[idx]
-        img_path = os.path.join(self.img_dir, img_name)
-        img = Image.open(img_path).convert("RGB")
-        label_name = img_name.split('_')[2]  # e.g., car_horn
+        file_name = self.files[idx]
+        file_path = os.path.join(self.data_dir, file_name)
+        
+        # Load the mel spectrogram array
+        mel_spec = np.load(file_path)
+        
+        # Ensure consistent time dimension
+        if mel_spec.shape[1] > self.target_length:
+            # Center crop if too long
+            start = (mel_spec.shape[1] - self.target_length) // 2
+            mel_spec = mel_spec[:, start:start + self.target_length]
+        elif mel_spec.shape[1] < self.target_length:
+            # Pad if too short
+            pad_width = self.target_length - mel_spec.shape[1]
+            mel_spec = np.pad(mel_spec, ((0, 0), (0, pad_width)), mode='constant')
+        
+        # Convert to tensor and add channel dimension
+        mel_spec = torch.from_numpy(mel_spec).float()
+        mel_spec = mel_spec.unsqueeze(0)  # Add channel dimension [1, n_mels, time]
+        
+        # Get label from filename
+        label_name = file_name.split('_')[2]  # e.g., car_horn
         label = self.class_to_idx[label_name]
-        if self.transform:
-            img = self.transform(img)
-        return img, label
+        
+        return mel_spec, label
 
 # --- Model ---
 from conv_encoder import ConvEncoder
@@ -36,7 +51,7 @@ from conv_encoder import ConvEncoder
 class ConvEncoderClassifier(nn.Module):
     def __init__(self, num_classes=10):
         super().__init__()
-        self.encoder = ConvEncoder(input_channels=3)
+        self.encoder = ConvEncoder(input_channels=1)  # Changed to 1 channel for mel spectrograms
         self.classifier = nn.Linear(512, num_classes)  # d_model=512
 
     def forward(self, x):
@@ -46,8 +61,8 @@ class ConvEncoderClassifier(nn.Module):
         return x
 
 # --- Prepare data ---
-img_dir = "mel_spectrograms_clean"
-all_files = [f for f in os.listdir(img_dir) if f.endswith('.png')]
+data_dir = "mel_spectrograms_clean"
+all_files = [f for f in os.listdir(data_dir) if f.endswith('.npy')]
 random.shuffle(all_files)
 
 # Extract all class names
@@ -59,13 +74,9 @@ split_idx = int(0.9 * len(all_files))
 train_files = all_files[:split_idx]
 test_files = all_files[split_idx:]
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),  # Ensure all images are the same size
-    transforms.ToTensor(),
-])
-
-train_dataset = MelSpectrogramDataset(img_dir, train_files, class_to_idx, transform)
-test_dataset = MelSpectrogramDataset(img_dir, test_files, class_to_idx, transform)
+# Create datasets with target length of 128 time steps
+train_dataset = MelSpectrogramDataset(data_dir, train_files, class_to_idx, target_length=128)
+test_dataset = MelSpectrogramDataset(data_dir, test_files, class_to_idx, target_length=128)
 
 batch_size = 32
 epochs = 20
@@ -78,7 +89,7 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, nu
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
 # --- Training ---
-model = ConvEncoderClassifier(num_classes=10).to(device)
+model = ConvEncoderClassifier(num_classes=len(class_names)).to(device)
 optimizer = optim.Adam(model.parameters(), lr=lr)
 criterion = nn.CrossEntropyLoss()
 
@@ -87,14 +98,14 @@ for epoch in range(1, epochs+1):
     running_loss = 0.0
     correct = 0
     total = 0
-    for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}"):
-        imgs, labels = imgs.to(device), labels.to(device)
+    for mel_specs, labels in tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}"):
+        mel_specs, labels = mel_specs.to(device), labels.to(device)
         optimizer.zero_grad()
-        outputs = model(imgs)
+        outputs = model(mel_specs)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
-        running_loss += loss.item() * imgs.size(0)
+        running_loss += loss.item() * mel_specs.size(0)
         _, predicted = outputs.max(1)
         correct += predicted.eq(labels).sum().item()
         total += labels.size(0)
@@ -106,9 +117,9 @@ for epoch in range(1, epochs+1):
     correct = 0
     total = 0
     with torch.no_grad():
-        for imgs, labels in test_loader:
-            imgs, labels = imgs.to(device), labels.to(device)
-            outputs = model(imgs)
+        for mel_specs, labels in test_loader:
+            mel_specs, labels = mel_specs.to(device), labels.to(device)
+            outputs = model(mel_specs)
             _, predicted = outputs.max(1)
             correct += predicted.eq(labels).sum().item()
             total += labels.size(0)
