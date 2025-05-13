@@ -17,16 +17,16 @@ sweep_config = {
             # Current is 1e-4
         },
         'epochs': {
-            'values': [20, 30, 40]  # Current is 20
+            'values': [20]  # Current is 20
         },
         'nhead': {
-            'values': [4]  # Current is 4
+            'values': [4,8]  # Current is 4
         },
         'num_encoder_layers': {
             'values': [2, 3, 4]  # Current is 3
         },
         'dim_feedforward': {
-            'values': [512, 1024, 2048]  # Current is 1024
+            'values': [1024, 2048]  # Current is 1024
         },
         'dropout': {
             'values': [0.1, 0.15, 0.2]  # Current is 0.1
