@@ -6,6 +6,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from tqdm import tqdm
+import wandb
 
 # --- Dataset ---
 class MelSpectrogramDataset(Dataset):
@@ -52,7 +53,7 @@ class ConvEncoderClassifier(nn.Module):
     def __init__(self, num_classes=10):
         super().__init__()
         self.encoder = ConvEncoder(input_channels=1)  # Changed to 1 channel for mel spectrograms
-        self.classifier = nn.Linear(512, num_classes)  # d_model=512
+        self.classifier = nn.Linear(256, num_classes)  # Changed from 512 to 256 to match new d_model
 
     def forward(self, x):
         x = self.encoder(x)  # [B, seq_len, d_model]
@@ -74,11 +75,11 @@ split_idx = int(0.9 * len(all_files))
 train_files = all_files[:split_idx]
 test_files = all_files[split_idx:]
 
-# Create datasets with target length of 128 time steps
-train_dataset = MelSpectrogramDataset(data_dir, train_files, class_to_idx, target_length=128)
-test_dataset = MelSpectrogramDataset(data_dir, test_files, class_to_idx, target_length=128)
+# Create datasets with target length of 345 time steps
+train_dataset = MelSpectrogramDataset(data_dir, train_files, class_to_idx, target_length=345)
+test_dataset = MelSpectrogramDataset(data_dir, test_files, class_to_idx, target_length=345)
 
-batch_size = 32
+batch_size = 64  # Reduced from 16 to 4
 epochs = 20
 lr = 1e-4
 
@@ -88,10 +89,27 @@ print(f"Using device: {device}")
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
+# Initialize wandb
+wandb.init(
+    project="audio-classification",
+    config={
+        "architecture": "ConvEncoder",
+        "dataset": "UrbanSound8K",
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": lr,
+        "num_classes": len(class_names),
+        "classes": class_names
+    }
+)
+
 # --- Training ---
 model = ConvEncoderClassifier(num_classes=len(class_names)).to(device)
 optimizer = optim.Adam(model.parameters(), lr=lr)
 criterion = nn.CrossEntropyLoss()
+
+# Log model architecture
+wandb.watch(model, log="all")
 
 for epoch in range(1, epochs+1):
     model.train()
@@ -110,18 +128,38 @@ for epoch in range(1, epochs+1):
         correct += predicted.eq(labels).sum().item()
         total += labels.size(0)
     train_acc = correct / total
-    print(f"Epoch {epoch}: Train Loss: {running_loss/total:.4f}, Train Acc: {train_acc:.4f}")
+    train_loss = running_loss / total
+    print(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
 
     # --- Evaluation ---
     model.eval()
     correct = 0
     total = 0
+    test_loss = 0.0
     with torch.no_grad():
         for mel_specs, labels in test_loader:
             mel_specs, labels = mel_specs.to(device), labels.to(device)
             outputs = model(mel_specs)
+            loss = criterion(outputs, labels)
+            test_loss += loss.item() * mel_specs.size(0)
             _, predicted = outputs.max(1)
             correct += predicted.eq(labels).sum().item()
             total += labels.size(0)
     test_acc = correct / total
-    print(f"Epoch {epoch}: Test Acc: {test_acc:.4f}") 
+    test_loss = test_loss / total
+    print(f"Epoch {epoch}: Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
+    
+    # Log metrics to wandb
+    wandb.log({
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "train_accuracy": train_acc,
+        "test_loss": test_loss,
+        "test_accuracy": test_acc
+    })
+    
+    # Clear GPU memory after each epoch
+    torch.cuda.empty_cache()
+
+# Close wandb run
+wandb.finish() 

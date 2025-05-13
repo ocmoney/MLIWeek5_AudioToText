@@ -2,10 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from PIL import Image
-import torchvision.transforms as transforms
-import matplotlib.pyplot as plt
-import os
 
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -20,30 +16,31 @@ class SinusoidalPositionalEncoding(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: Tensor, shape [seq_len, batch_size, embedding_dim]
+            x: Tensor, shape [batch_size, seq_len, d_model]
         """
-        return x + self.pe[:x.size(0)]
+        # Add positional encoding to each sequence in the batch
+        return x + self.pe[:x.size(1)].transpose(0, 1)  # [1, seq_len, d_model] -> [seq_len, 1, d_model]
 
 class ConvEncoder(nn.Module):
     def __init__(self, 
                  input_channels=1,
-                 conv_channels=256,
-                 d_model=512,
-                 nhead=8,
-                 num_encoder_layers=6,
-                 dim_feedforward=2048,
+                 conv_channels=128,
+                 d_model=256,
+                 nhead=4,
+                 num_encoder_layers=3,
+                 dim_feedforward=1024,
                  dropout=0.1):
         super().__init__()
         
         # 1D Convolutional layer
-        self.conv = nn.Conv1d(input_channels, conv_channels, kernel_size=3, padding=1)
+        self.conv = nn.Conv1d(128, conv_channels, kernel_size=3, padding=1)  # Changed input_channels to 128 (n_mels)
         self.gelu = nn.GELU()
         
         # Projection to transformer dimension
         self.projection = nn.Linear(conv_channels, d_model)
         
         # Positional encoding
-        self.pos_encoder = SinusoidalPositionalEncoding(d_model)
+        self.pos_encoder = SinusoidalPositionalEncoding(d_model, max_len=345)  # Matches spectrogram time steps
         
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -64,54 +61,24 @@ class ConvEncoder(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
     
-    def preprocess_spectrogram(self, spectrogram):
-        """
-        Preprocess the spectrogram by cropping out axes and labels
-        Args:
-            spectrogram: PIL Image or tensor of shape [batch_size, channels, height, width]
-        Returns:
-            Processed tensor of shape [batch_size, channels, height, width]
-        """
-        if isinstance(spectrogram, Image.Image):
-            # Convert PIL image to tensor
-            transform = transforms.ToTensor()
-            spectrogram = transform(spectrogram)
-        
-        # Assuming the spectrogram has axes and labels that need to be cropped
-        # You'll need to adjust these values based on your actual spectrogram format
-        # This is a placeholder implementation
-        batch_size, channels, height, width = spectrogram.shape
-        cropped_height = height - 40  # Adjust based on your needs
-        cropped_width = width - 40    # Adjust based on your needs
-        
-        # Center crop
-        start_h = (height - cropped_height) // 2
-        start_w = (width - cropped_width) // 2
-        spectrogram = spectrogram[:, :, start_h:start_h + cropped_height, start_w:start_w + cropped_width]
-        
-        return spectrogram
-    
     def forward(self, x):
         """
         Args:
-            x: Input spectrogram tensor of shape [batch_size, channels, height, width]
+            x: Input spectrogram tensor of shape [batch_size, channels, n_mels, time_steps]
         Returns:
             Encoded features of shape [batch_size, seq_len, d_model]
         """
-        # Preprocess spectrogram
-        x = self.preprocess_spectrogram(x)
-        
         # Reshape for 1D convolution
-        batch_size, channels, height, width = x.shape
-        x = x.reshape(batch_size, channels, -1)  # [batch_size, channels, height*width]
+        batch_size, channels, n_mels, time_steps = x.shape
+        x = x.squeeze(1)  # Remove channel dimension since we're using n_mels as channels [batch_size, n_mels, time_steps]
         
         # Apply 1D convolution and GELU
         x = self.conv(x)
         x = self.gelu(x)
         
         # Project to transformer dimension
-        x = x.transpose(1, 2)  # [batch_size, seq_len, conv_channels]
-        x = self.projection(x)  # [batch_size, seq_len, d_model]
+        x = x.transpose(1, 2)  # [batch_size, time_steps, conv_channels]
+        x = self.projection(x)  # [batch_size, time_steps, d_model]
         
         # Add positional encoding
         x = self.pos_encoder(x)
@@ -120,44 +87,3 @@ class ConvEncoder(nn.Module):
         x = self.transformer_encoder(x)
         
         return x
-
-if __name__ == "__main__":
-    import os
-    import matplotlib.pyplot as plt
-    import torchvision.transforms as transforms
-
-    # Path to the mel_spectrograms_clean directory
-    img_dir = "mel_spectrograms_clean"
-    img_files = [f for f in os.listdir(img_dir) if f.endswith('.png')]
-    if not img_files:
-        print("No images found in mel_spectrograms_clean.")
-        exit(1)
-    img_path = os.path.join(img_dir, img_files[0])
-    print(f"Using image: {img_path}")
-    img = Image.open(img_path)
-    img = img.convert("RGB")  # Ensure image is RGB, not RGBA
-
-    # No cropping needed for these images
-    img_cropped = img
-
-    # Convert to tensor and add batch/channel dimensions
-    transform = transforms.ToTensor()
-    tensor = transform(img_cropped)  # [C, H, W]
-    tensor = tensor.unsqueeze(0)     # [1, C, H, W]
-
-    # Instantiate encoder
-    encoder = ConvEncoder(input_channels=3)  # 3 for RGB, 1 for grayscale
-    encoder.eval()
-
-    # Run through encoder
-    with torch.no_grad():
-        output = encoder(tensor)
-    print(f"Encoder output shape: {output.shape}")
-    # Optionally, print a summary of the output
-    print(f"Encoder output (first 1x5x5 block):\n{output[0, :5, :5]}")
-
-    # Show the image for debugging
-    plt.imshow(img_cropped)
-    plt.title("Example Mel Spectrogram Image")
-    plt.axis('off')
-    plt.show()
