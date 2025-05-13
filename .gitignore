@@ -3,8 +3,32 @@ miniconda/
 miniconda.sh
 /opt/conda/
 
-# Generated spectrograms
+# Generated spectrograms and data
 mel_spectrograms/
+/mel_spectrograms_clean
+mel_spectrograms_clean/
+/clean_spectogram/mel_spectrograms_clean
+clean_spectogram/mel_spectrograms_clean/
+
+# Model checkpoints and large files
+checkpoints/
+*.pt
+*.pth
+*.h5
+*.ckpt
+*.bin
+*.onnx
+*.npy
+*.npz
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mov
 
 # Python
 __pycache__/
@@ -39,8 +63,9 @@ wheels/
 .DS_Store
 Thumbs.db 
 
+# Project specific
 /artifacts
 /spectrogram_images
 /wandb
-/mel_spectrograms_clean
-/clean_spectogram/mel_spectrograms_clean
+*.png
+=*

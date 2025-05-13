@@ -79,7 +79,7 @@ test_files = all_files[split_idx:]
 train_dataset = MelSpectrogramDataset(data_dir, train_files, class_to_idx, target_length=345)
 test_dataset = MelSpectrogramDataset(data_dir, test_files, class_to_idx, target_length=345)
 
-batch_size = 64  # Reduced from 16 to 4
+batch_size = 64 
 epochs = 20
 lr = 1e-4
 
@@ -107,6 +107,12 @@ wandb.init(
 model = ConvEncoderClassifier(num_classes=len(class_names)).to(device)
 optimizer = optim.Adam(model.parameters(), lr=lr)
 criterion = nn.CrossEntropyLoss()
+
+# Create directory for model checkpoints
+os.makedirs('checkpoints', exist_ok=True)
+
+# Initialize best accuracy tracking
+best_test_acc = 0.0
 
 # Log model architecture
 wandb.watch(model, log="all")
@@ -149,13 +155,29 @@ for epoch in range(1, epochs+1):
     test_loss = test_loss / total
     print(f"Epoch {epoch}: Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
     
+    # Save best model
+    if test_acc > best_test_acc:
+        best_test_acc = test_acc
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'test_accuracy': test_acc,
+            'train_accuracy': train_acc,
+            'test_loss': test_loss,
+            'train_loss': train_loss
+        }
+        torch.save(checkpoint, f'checkpoints/best_model.pt')
+        print(f"New best model saved with test accuracy: {test_acc:.4f}")
+    
     # Log metrics to wandb
     wandb.log({
         "epoch": epoch,
         "train_loss": train_loss,
         "train_accuracy": train_acc,
         "test_loss": test_loss,
-        "test_accuracy": test_acc
+        "test_accuracy": test_acc,
+        "best_test_accuracy": best_test_acc
     })
     
     # Clear GPU memory after each epoch
