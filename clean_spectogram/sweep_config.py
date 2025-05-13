@@ -37,7 +37,7 @@ sweep_config = {
 # Define the initial parameters that we know work well
 initial_params = {
     'batch_size': 64,
-    'learning_rate': 1e-4,
+    'learning_rate': 1e-4, #this is actually 0.0001
     'epochs': 20,
     'nhead': 4,
     'num_encoder_layers': 3,
