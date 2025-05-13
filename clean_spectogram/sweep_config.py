@@ -8,13 +8,13 @@ sweep_config = {
     },
     'parameters': {
         'batch_size': {
-            'values': [32, 64, 128]  # Current is 64
+            'values': [64]  # Current is 64
         },
         'learning_rate': {
-            'distribution': 'log_uniform',
-            'min': -5,  # 1e-5
-            'max': -3,  # 1e-3
-            # Current is 1e-4
+            'distribution': 'uniform',
+            'min': 0.00005,  
+            'max': 0.001,   
+            
         },
         'epochs': {
             'values': [20]  # Current is 20
