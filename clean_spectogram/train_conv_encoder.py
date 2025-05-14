@@ -11,7 +11,7 @@ from conv_encoder import ConvEncoder
 
 # --- Dataset ---
 class MelSpectrogramDataset(Dataset):
-    def __init__(self, data_dir, files, class_to_idx, target_length=128):
+    def __init__(self, data_dir, files, class_to_idx, target_length=345):
         self.data_dir = data_dir
         self.files = files
         self.class_to_idx = class_to_idx
@@ -24,25 +24,20 @@ class MelSpectrogramDataset(Dataset):
         file_name = self.files[idx]
         file_path = os.path.join(self.data_dir, file_name)
         
-        # Load the mel spectrogram array
         mel_spec = np.load(file_path)
         
-        # Ensure consistent time dimension
         if mel_spec.shape[1] > self.target_length:
-            # Center crop if too long
             start = (mel_spec.shape[1] - self.target_length) // 2
             mel_spec = mel_spec[:, start:start + self.target_length]
         elif mel_spec.shape[1] < self.target_length:
-            # Pad if too short
             pad_width = self.target_length - mel_spec.shape[1]
             mel_spec = np.pad(mel_spec, ((0, 0), (0, pad_width)), mode='constant')
         
-        # Convert to tensor and add channel dimension
         mel_spec = torch.from_numpy(mel_spec).float()
-        mel_spec = mel_spec.unsqueeze(0)  # Add channel dimension [1, n_mels, time]
+        mel_spec = mel_spec.unsqueeze(0)
         
-        # Get label from filename
-        label_name = file_name.split('_')[2]  # e.g., car_horn
+        # Extract label from filename: fold{F}_idx{I}_{label}.npy
+        label_name = file_name.split('_')[2].replace(".npy", "")
         label = self.class_to_idx[label_name]
         
         return mel_spec, label
@@ -68,26 +63,44 @@ class ConvEncoderClassifier(nn.Module):
 
 def train(config=None):
     with wandb.init(config=config):
-        # If called by wandb.agent, config will be set
         config = wandb.config
         
-        # --- Prepare data ---
         data_dir = "mel_spectrograms_clean"
-        all_files = [f for f in os.listdir(data_dir) if f.endswith('.npy')]
-        random.shuffle(all_files)
+        all_npy_files = [f for f in os.listdir(data_dir) if f.endswith('.npy')]
 
-        # Extract all class names
-        class_names = sorted(list({f.split('_')[2] for f in all_files}))
+        # Extract class names from all files to build a consistent class_to_idx map
+        # Filename format: fold{F}_idx{I}_{label}.npy
+        class_names = sorted(list(set([f.split('_')[2].replace(".npy", "") for f in all_npy_files])))
         class_to_idx = {cls: i for i, cls in enumerate(class_names)}
 
-        # Split 90% train, 10% test
-        split_idx = int(0.9 * len(all_files))
-        train_files = all_files[:split_idx]
-        test_files = all_files[split_idx:]
+        train_files = []
+        test_files = []
+        test_fold_number = 10  # Using fold 10 for testing
 
-        # Create datasets
-        train_dataset = MelSpectrogramDataset(data_dir, train_files, class_to_idx, target_length=345)
-        test_dataset = MelSpectrogramDataset(data_dir, test_files, class_to_idx, target_length=345)
+        for f_name in all_npy_files:
+            try:
+                # Filename format: fold{F}_idx{I}_{label}.npy
+                fold_str = f_name.split('_')[0]
+                fold_num_in_file = int(fold_str.replace("fold", ""))
+                
+                if fold_num_in_file == test_fold_number:
+                    test_files.append(f_name)
+                else:
+                    train_files.append(f_name)
+            except (IndexError, ValueError) as e:
+                print(f"Skipping malformed filename {f_name}: {e}")
+                continue
+        
+        # Shuffle train and test sets separately
+        random.shuffle(train_files)
+        random.shuffle(test_files)
+
+        print(f"Training files: {len(train_files)}, Test files: {len(test_files)}")
+        if not train_files or not test_files:
+            raise ValueError("Train or test file list is empty. Check fold splitting or filenames.")
+
+        train_dataset = MelSpectrogramDataset(data_dir, train_files, class_to_idx, target_length=config.get("target_length", 345))
+        test_dataset = MelSpectrogramDataset(data_dir, test_files, class_to_idx, target_length=config.get("target_length", 345))
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
@@ -95,7 +108,6 @@ def train(config=None):
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=2)
         test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, num_workers=2)
 
-        # Initialize model with sweep parameters
         model = ConvEncoderClassifier(
             num_classes=len(class_names),
             nhead=config.nhead,
@@ -107,11 +119,11 @@ def train(config=None):
         optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
         criterion = nn.CrossEntropyLoss()
 
-        # Create directory for model checkpoints
         os.makedirs('checkpoints', exist_ok=True)
         best_test_acc = 0.0
+        epochs_no_improve = 0  # Initialize counter for early stopping
+        patience = config.patience # Get patience from config
 
-        # Training loop
         for epoch in range(1, config.epochs + 1):
             model.train()
             running_loss = 0.0
@@ -130,11 +142,10 @@ def train(config=None):
                 correct += predicted.eq(labels).sum().item()
                 total += labels.size(0)
                 
-            train_acc = correct / total
-            train_loss = running_loss / total
+            train_acc = correct / total if total > 0 else 0
+            train_loss = running_loss / total if total > 0 else 0
             print(f"Epoch {epoch}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
 
-            # Evaluation
             model.eval()
             correct = 0
             total = 0
@@ -150,11 +161,10 @@ def train(config=None):
                     correct += predicted.eq(labels).sum().item()
                     total += labels.size(0)
                     
-            test_acc = correct / total
-            test_loss = test_loss / total
+            test_acc = correct / total if total > 0 else 0
+            test_loss = test_loss / total if total > 0 else 0
             print(f"Epoch {epoch}: Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
 
-            # Save best model
             if test_acc > best_test_acc:
                 best_test_acc = test_acc
                 checkpoint = {
@@ -169,8 +179,10 @@ def train(config=None):
                 }
                 torch.save(checkpoint, f'checkpoints/best_model.pt')
                 print(f"New best model saved with test accuracy: {test_acc:.4f}")
+                epochs_no_improve = 0  # Reset counter
+            else:
+                epochs_no_improve += 1 # Increment counter if no improvement
 
-            # Log metrics
             wandb.log({
                 "epoch": epoch,
                 "train_loss": train_loss,
@@ -180,21 +192,23 @@ def train(config=None):
                 "best_test_accuracy": best_test_acc
             })
 
-            # Clear GPU memory
+            if epochs_no_improve >= patience:
+                print(f"Early stopping triggered after {epoch} epochs due to no improvement for {patience} epochs.")
+                break  # Stop training
+
             torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     from sweep_config import sweep_config, init_sweep, initial_params
+    if 'target_length' not in initial_params:
+        initial_params['target_length'] = 345 # Default if not in sweep
     
-    # Initialize sweep
-    sweep_id, initial_params = init_sweep()
-    
-    # First run with known good parameters
-    print("Starting with known good parameters:")
-    for key, value in initial_params.items():
+    sweep_id, initial_params_from_sweep = init_sweep()
+    # Merge or prioritize initial_params if needed, for now using sweep's initial
+    print("Starting with parameters from sweep init or defaults:")
+    for key, value in initial_params_from_sweep.items():
         print(f"{key}: {value}")
-    train(initial_params)
+    train(initial_params_from_sweep)
     
-    # Then start the sweep for optimization
     print("\nStarting hyperparameter sweep...")
-    wandb.agent(sweep_id, function=train, count=19)  # Run 19 more trials (20 total including initial) 
+    wandb.agent(sweep_id, function=train, count=19) 

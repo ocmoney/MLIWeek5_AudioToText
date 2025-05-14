@@ -20,8 +20,11 @@ rm miniconda.sh
 # Add conda to PATH and initialize
 echo "Configuring conda..."
 echo 'export PATH="/opt/conda/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
+# Source bashrc to make conda available in this script session immediately after init
+source ~/.bashrc 
 /opt/conda/bin/conda init bash
+# Source bashrc again to pick up changes from conda init and ensure subsequent commands in this script work
+source ~/.bashrc 
 
 # Create and activate conda environment
 echo "Creating conda environment..."

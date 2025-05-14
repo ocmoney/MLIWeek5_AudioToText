@@ -12,8 +12,8 @@ sweep_config = {
         },
         'learning_rate': {
             'distribution': 'uniform',
-            'min': 0.00005,  
-            'max': 0.001,   
+            'min': 0.0001,  
+            'max': 0.0002,   
             
         },
         'epochs': {
@@ -23,13 +23,16 @@ sweep_config = {
             'values': [4,8]  # Current is 4
         },
         'num_encoder_layers': {
-            'values': [2, 3, 4]  # Current is 3
+            'values': [2, 3]  # Current is 3
         },
         'dim_feedforward': {
-            'values': [1024, 2048]  # Current is 1024
+            'values': [2048]  # Current is 1024
         },
         'dropout': {
-            'values': [0.1, 0.15, 0.2]  # Current is 0.1
+            'values': [0.15, 0.2, 0.25,0.3]  # Current is 0.1
+        },
+        'patience': {
+            'values': [5]
         }
     }
 }
@@ -42,7 +45,8 @@ initial_params = {
     'nhead': 4,
     'num_encoder_layers': 3,
     'dim_feedforward': 1024,
-    'dropout': 0.1
+    'dropout': 0.1,
+    'patience': 3
 }
 
 def init_sweep():

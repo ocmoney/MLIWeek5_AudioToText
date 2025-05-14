@@ -83,11 +83,12 @@ for idx, row in tqdm(df.iterrows(), total=len(df)):
     if len(first_five_specs) < 5:
         first_five_specs.append(mel_spec)
 
-    # Build filename with useful metadata
-    class_id = row["classID"]
-    label = row["class"]
-    filename = row["slice_file_name"]
-    output_path = os.path.join(output_dir, f"{idx}_{class_id}_{label}_{filename}.npy")
+    # Build filename with fold, index, and class metadata
+    fold_number = row["fold"]
+    class_name = row["class"]
+    # Using original DataFrame index (idx) for uniqueness and traceability
+    output_filename = f"fold{fold_number}_idx{idx}_{class_name}.npy"
+    output_path = os.path.join(output_dir, output_filename)
 
     # Save the raw mel spectrogram array
     np.save(output_path, mel_spec)
