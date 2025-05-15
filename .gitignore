@@ -24,3 +24,15 @@ spectograms/
 fma_small/
 
 fma_small.zip
+#gitignore everything in fma_spectograms
+fma_spectograms/
+
+/fma_spectograms/*
+fma_spectograms/*
+fma_spectrograms/000002.npy
+fma_spectrograms/000003.npy
+fma_spectrograms/000004.npy
+fma_spectrograms/000005.npy
+fma_spectrograms/000006.npy
+fma_spectrograms/000007.npy
+fma_spectrograms/000008.npy
