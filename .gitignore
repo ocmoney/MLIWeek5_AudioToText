@@ -19,3 +19,8 @@ __pycache__/model.cpython-312.pyc
 
 miniconda3-latest-Linux-x86_64.sh
 miniconda.sh
+
+spectograms/
+fma_small/
+
+fma_small.zip

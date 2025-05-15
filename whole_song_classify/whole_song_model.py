@@ -5,11 +5,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from model import SongToSliceTripletDataset, SpectrogramTower
+from tqdm import tqdm
+from datasets import load_dataset
 
 # --- Configuration ---
 METADATA_FILE = os.path.join('metadata.csv')  # Adjust path as needed
 SPECTROGRAM_DIR = '.'  # Current directory (spectrograms)
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 10
 EMBEDDING_DIM = 128
@@ -33,7 +35,6 @@ class SongAnchorClassificationDataset(SongToSliceTripletDataset):
             if tensor.ndim == 2:
                 tensor = tensor.unsqueeze(0)
             tensor = tensor.float()  # Ensure float32
-            print(f"Loaded tensor shape for {spec_path}: {tensor.shape}")  # Print shape of each slice
             tensors.append(tensor)
         # Padding if too short
         num_to_pad = self.max_slices - len(tensors)
@@ -42,7 +43,6 @@ class SongAnchorClassificationDataset(SongToSliceTripletDataset):
             for _ in range(num_to_pad):
                 tensors.append(torch.zeros(pad_shape, dtype=torch.float32))  # Ensure float32
         anchor = torch.cat(tensors, dim=-1)
-        print(f"Final anchor tensor shape for song_id {song_id}: {anchor.shape}")  # Print final anchor shape
         return anchor, song_id
 
 # --- Classifier Model ---
@@ -61,10 +61,37 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Build song_id to song name mapping (lightweight, only once)
+    print("Building song_id to song name mapping for analysis...")
+    from tqdm import tqdm as tqdm_local
+    dataset_hf = load_dataset("teticio/audio-diffusion-instrumental-hiphop-256", split="train")
+    audio_name_to_id = {}
+    id_to_audio_name = {}
+    next_id = 0
+    for sample in tqdm_local(dataset_hf, desc="Mapping song IDs"):
+        audio_base_name = os.path.splitext(os.path.basename(sample["audio_file"]))[0]
+        if audio_base_name not in audio_name_to_id:
+            audio_name_to_id[audio_base_name] = next_id
+            id_to_audio_name[next_id] = audio_base_name
+            next_id += 1
+    print(f"Mapping contains {len(id_to_audio_name)} song IDs.")
+
     # Prepare dataset and dataloader
     dataset = SongAnchorClassificationDataset(METADATA_FILE, SPECTROGRAM_DIR)
     num_classes = len(dataset.song_ids)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+
+    # Preload dataset with tqdm loading bar
+    print("Preloading dataset into memory...")
+    preload_data = []
+    for i in tqdm(range(len(dataset)), desc="Loading dataset"):
+        anchor, song_id = dataset[i]
+        # Verify mapping: print warning if song_id not in id_to_audio_name
+        if song_id not in id_to_audio_name:
+            print(f"[WARNING] song_id {song_id} not found in mapping!")
+        preload_data.append((anchor, song_id))
+    print("Preloading complete.")
+
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
 
     # Model, loss, optimizer
     model = SongIDClassifier(EMBEDDING_DIM, num_classes, in_channels=SPECTROGRAM_CHANNELS).to(device)
@@ -80,6 +107,10 @@ if __name__ == "__main__":
         for anchors, song_ids in dataloader:
             anchors = anchors.to(device)
             song_ids = song_ids.to(device)
+
+            # Print song name for first song in batch (for analysis)
+            batch_song_id = song_ids[0].item()
+            song_name = id_to_audio_name.get(batch_song_id, "Unknown")
 
             optimizer.zero_grad()
             outputs = model(anchors)
