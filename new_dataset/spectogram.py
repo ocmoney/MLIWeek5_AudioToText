@@ -24,6 +24,9 @@ mel_transform = torchaudio.transforms.MelSpectrogram(
 ).to(device)
 amp_to_db = torchaudio.transforms.AmplitudeToDB().to(device)
 
+segment_seconds = 3
+segment_samples = segment_seconds * sample_rate
+
 first_five_specs = []
 count = 0
 
@@ -32,9 +35,6 @@ for root, dirs, files in os.walk(AUDIO_DIR):
     for file in tqdm(files, desc="Processing audio files"):
         if file.endswith('.mp3'):
             audio_path = os.path.join(root, file)
-            out_path = os.path.join(OUTPUT_DIR, file.replace('.mp3', '.npy'))
-            if os.path.exists(out_path):
-                continue  # Skip if already processed
             try:
                 waveform, sr = torchaudio.load(audio_path)
             except Exception as e:
@@ -45,14 +45,22 @@ for root, dirs, files in os.walk(AUDIO_DIR):
             # Convert to mono if stereo
             if waveform.shape[0] > 1:
                 waveform = waveform.mean(dim=0, keepdim=True)
-            waveform = waveform.to(device)
-            mel_spec = mel_transform(waveform)
-            mel_spec_db = amp_to_db(mel_spec)
-            mel_spec_db = mel_spec_db.cpu().numpy()
-            np.save(out_path, mel_spec_db)
-            if count < 5:
-                first_five_specs.append(mel_spec_db)
-                count += 1
+            waveform = waveform.squeeze(0)  # [samples]
+            total_samples = waveform.shape[0]
+            num_segments = total_samples // segment_samples
+            for i in range(num_segments):
+                start = i * segment_samples
+                end = start + segment_samples
+                segment = waveform[start:end]
+                segment = segment.unsqueeze(0).to(device)
+                mel_spec = mel_transform(segment)
+                mel_spec_db = amp_to_db(mel_spec)
+                mel_spec_db = mel_spec_db.cpu().numpy()
+                out_path = os.path.join(OUTPUT_DIR, f"{file.replace('.mp3','')}_seg{i}.npy")
+                np.save(out_path, mel_spec_db)
+                if count < 5:
+                    first_five_specs.append(mel_spec_db)
+                    count += 1
 
 print("\nFirst 5 spectrogram shapes:")
 for i, spec in enumerate(first_five_specs):

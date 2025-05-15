@@ -11,7 +11,7 @@ import numpy as np
 
 # --- Config ---
 METADATA_FILE = "fma_metadata.csv"
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 20
 MODEL_SAVE_PATH = "song_classifier.pth"
