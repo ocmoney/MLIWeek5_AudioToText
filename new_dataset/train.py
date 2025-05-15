@@ -4,14 +4,15 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 import pandas as pd
-from model import SongClassifier
+from model import SongEmbeddingNet
 import torchaudio
 from tqdm import tqdm
 import numpy as np
+from scipy.ndimage import gaussian_filter
 
 # --- Config ---
 METADATA_FILE = "fma_metadata.csv"
-BATCH_SIZE = 16
+BATCH_SIZE = 64
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 20
 MODEL_SAVE_PATH = "song_classifier.pth"
@@ -52,99 +53,138 @@ class FMASpectrogramDataset(Dataset):
         label = self.song_id_to_idx[self.song_ids[idx]]
         return spec, label
 
+# --- Triplet Dataset ---
+class FMATripletDataset(Dataset):
+    def __init__(self, metadata_file, slice_seconds=5, sample_rate=22050, hop_length=512, anchor_target_time=1291):
+        self.df = pd.read_csv(metadata_file)
+        self.song_to_path = {row['song_id']: row['spectrogram_path'] for _, row in self.df.iterrows()}
+        self.song_ids = list(self.song_to_path.keys())
+        self.slice_seconds = slice_seconds
+        self.sample_rate = sample_rate
+        self.hop_length = hop_length
+        self.slice_frames = int((slice_seconds * sample_rate) // hop_length)
+        self.anchor_target_time = anchor_target_time  # e.g. 1291, to match model input
+
+    def __len__(self):
+        return len(self.song_ids)
+
+    def __getitem__(self, idx):
+        anchor_song = self.song_ids[idx]
+        anchor_spec = np.load(self.song_to_path[anchor_song])  # [1, n_mels, time]
+        if anchor_spec.ndim == 2:
+            anchor_spec = np.expand_dims(anchor_spec, 0)
+        # Pad/crop anchor to anchor_target_time
+        time_dim = anchor_spec.shape[-1]
+        if time_dim > self.anchor_target_time:
+            start = (time_dim - self.anchor_target_time) // 2
+            anchor_crop = anchor_spec[..., start:start+self.anchor_target_time]
+        elif time_dim < self.anchor_target_time:
+            pad_width = self.anchor_target_time - time_dim
+            anchor_crop = np.pad(anchor_spec, ((0,0), (0,0), (0, pad_width)), mode='constant')
+        else:
+            anchor_crop = anchor_spec
+        # Positive: random 5s slice from this song
+        max_start = time_dim - self.slice_frames
+        if max_start < 1:
+            raise ValueError(f"Song {anchor_song} too short for slicing: {time_dim} frames, need {self.slice_frames}")
+        p_start = np.random.randint(0, max_start)
+        positive_slice = anchor_spec[..., p_start:p_start+self.slice_frames]
+        # Negative: random 5s slice from a different song
+        neg_song = np.random.choice([sid for sid in self.song_ids if sid != anchor_song])
+        neg_spec = np.load(self.song_to_path[neg_song])
+        if neg_spec.ndim == 2:
+            neg_spec = np.expand_dims(neg_spec, 0)
+        neg_time_dim = neg_spec.shape[-1]
+        neg_max_start = neg_time_dim - self.slice_frames
+        if neg_max_start < 1:
+            raise ValueError(f"Negative song {neg_song} too short for slicing: {neg_time_dim} frames, need {self.slice_frames}")
+        n_start = np.random.randint(0, neg_max_start)
+        negative_slice = neg_spec[..., n_start:n_start+self.slice_frames]
+        # Apply Gaussian blur
+        positive_slice = gaussian_filter(positive_slice, sigma=(0, 1, 1))
+        negative_slice = gaussian_filter(negative_slice, sigma=(0, 1, 1))
+        # Convert to torch
+        return (
+            torch.from_numpy(anchor_crop).float(),
+            torch.from_numpy(positive_slice).float(),
+            torch.from_numpy(negative_slice).float()
+        )
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    dataset = FMASpectrogramDataset(METADATA_FILE)
-    num_classes = len(dataset.unique_song_ids)
-    # Print first 10 (label, song_id, file) triplets for verification
-    print("First 10 (label, song_id, file, song_name) triplets:")
-    # Try to get song name from a CSV if available
-    song_id_to_name = {}
-    if os.path.exists('tracks.csv'):
-        import pandas as pd
-        tracks_df = pd.read_csv('tracks.csv', index_col=0, low_memory=False)
-        # FMA track_id is the song_id, and 'title' is the song name
-        for track_id, row in tracks_df.iterrows():
-            song_id_to_name[str(track_id)] = row.get('title', 'Unknown')
-    for i in range(min(10, len(dataset))):
-        song_id = dataset.song_ids[i]
-        label = dataset.song_id_to_idx[song_id]
-        file = dataset.paths[i]
-        song_name = song_id_to_name.get(str(song_id), 'Unknown')
-        print(f"label: {label}, song_id: {song_id}, file: {file}, song_name: {song_name}")
-
-    # Shuffle indices
+    # Use triplet dataset
+    dataset = FMATripletDataset(METADATA_FILE, slice_seconds=5, sample_rate=22050, hop_length=512, anchor_target_time=1291)
     num_examples = len(dataset)
     indices = np.arange(num_examples)
-    np.random.seed(42)  # For reproducibility
+    np.random.seed(42)
     np.random.shuffle(indices)
-
-    # Split
-    test_size = int(0.05 * num_examples)
+    test_size = int(0.1 * num_examples)
     test_indices = indices[:test_size]
     train_indices = indices[test_size:]
-
     train_dataset = Subset(dataset, train_indices)
     test_dataset = Subset(dataset, test_indices)
-
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
-    model = SongClassifier(num_classes=num_classes).to(device)
-    criterion = nn.CrossEntropyLoss()
+    model = SongEmbeddingNet().to(device)
+    criterion = nn.TripletMarginLoss(margin=0.5, p=2)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     for epoch in range(NUM_EPOCHS):
-        print(f"\nEpoch {epoch+1}: Number of unique songs (classes): {num_classes}")
+        print(f"\nEpoch {epoch+1} (Triplet Loss)")
         model.train()
         running_loss = 0.0
-        correct = 0
-        total = 0
-        for batch_idx, (specs, labels) in enumerate(train_loader):
-            specs = specs.to(device)
-            labels = labels.to(device)
+        running_acc = 0.0
+        for batch_idx, (anchor, positive, negative) in enumerate(train_loader):
+            anchor = anchor.to(device)
+            positive = positive.to(device)
+            negative = negative.to(device)
             optimizer.zero_grad()
-            outputs = model(specs)
-            loss = criterion(outputs, labels)
+            anchor_emb = model(anchor)
+            positive_emb = model(positive)
+            negative_emb = model(negative)
+            loss = criterion(anchor_emb, positive_emb, negative_emb)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item() * specs.size(0)
-            _, predicted = torch.max(outputs, 1)
-            correct += (predicted == labels).sum().item()
-            total += labels.size(0)
-            if (batch_idx + 1) % 10 == 0:
-                print(f"  [Train] Epoch {epoch+1} Batch {batch_idx+1}: Loss: {loss.item():.4f}")
-        epoch_loss = running_loss / total
-        epoch_acc = correct / total
-        print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}")
-        if not FMASpectrogramDataset.stats_printed:
-            print(f"Padded {FMASpectrogramDataset.pad_count} files to {TARGET_TIME} frames.")
-            print(f"Cropped {FMASpectrogramDataset.crop_count} files to {TARGET_TIME} frames.")
-            FMASpectrogramDataset.stats_printed = True
+            running_loss += loss.item() * anchor.size(0)
+            # Compute accuracy: anchor should be closer to positive than negative
+            d_ap = torch.norm(anchor_emb - positive_emb, dim=1)
+            d_an = torch.norm(anchor_emb - negative_emb, dim=1)
+            acc = (d_ap < d_an).float().mean().item()
+            running_acc += acc * anchor.size(0)
+            if batch_idx == 0:
+                print("d_ap (mean):", d_ap.mean().item(), "d_an (mean):", d_an.mean().item())
+                print("d_ap (min):", d_ap.min().item(), "d_an (min):", d_an.min().item())
+                print("d_ap (max):", d_ap.max().item(), "d_an (max):", d_an.max().item())
+            print(f"  [Train] Epoch {epoch+1} Batch {batch_idx+1}: Loss: {loss.item():.4f} Acc: {acc:.4f}")
+        epoch_loss = running_loss / len(train_loader.dataset)
+        epoch_acc = running_acc / len(train_loader.dataset)
+        print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] Triplet Loss: {epoch_loss:.4f} Train Acc: {epoch_acc:.4f}")
 
-        # Test loop (if you have a test_loader)
-        if 'test_loader' in locals():
-            model.eval()
-            test_loss = 0.0
-            correct = 0
-            total = 0
-            for batch_idx, (specs, labels) in enumerate(test_loader):
-                specs = specs.to(device)
-                labels = labels.to(device)
-                with torch.no_grad():
-                    outputs = model(specs)
-                    loss = criterion(outputs, labels)
-                test_loss += loss.item() * specs.size(0)
-                _, predicted = torch.max(outputs, 1)
-                correct += (predicted == labels).sum().item()
-                total += labels.size(0)
-                if (batch_idx + 1) % 10 == 0:
-                    print(f"  [Test] Epoch {epoch+1} Batch {batch_idx+1}: Loss: {loss.item():.4f}")
-            test_loss = test_loss / total if total > 0 else 0
-            test_acc = correct / total if total > 0 else 0
-            print(f"[Test] Epoch [{epoch+1}/{NUM_EPOCHS}] Loss: {test_loss:.4f} Acc: {test_acc:.4f}")
+        # Optional: test loop (unsupervised, so just report loss and accuracy)
+        model.eval()
+        test_loss = 0.0
+        test_acc = 0.0
+        with torch.no_grad():
+            for batch_idx, (anchor, positive, negative) in enumerate(test_loader):
+                anchor = anchor.to(device)
+                positive = positive.to(device)
+                negative = negative.to(device)
+                anchor_emb = model(anchor)
+                positive_emb = model(positive)
+                negative_emb = model(negative)
+                loss = criterion(anchor_emb, positive_emb, negative_emb)
+                test_loss += loss.item() * anchor.size(0)
+                d_ap = torch.norm(anchor_emb - positive_emb, dim=1)
+                d_an = torch.norm(anchor_emb - negative_emb, dim=1)
+                acc = (d_ap < d_an).float().mean().item()
+                test_acc += acc * anchor.size(0)
+                print(f"  [Test] Epoch {epoch+1} Batch {batch_idx+1}: Loss: {loss.item():.4f} Acc: {acc:.4f}")
+        test_loss = test_loss / len(test_loader.dataset)
+        test_acc = test_acc / len(test_loader.dataset)
+        print(f"[Test] Epoch [{epoch+1}/{NUM_EPOCHS}] Triplet Loss: {test_loss:.4f} Test Acc: {test_acc:.4f}")
 
     torch.save(model.state_dict(), MODEL_SAVE_PATH)
     print(f"Model saved to {MODEL_SAVE_PATH}")

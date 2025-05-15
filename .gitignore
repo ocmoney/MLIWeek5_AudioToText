@@ -36,3 +36,9 @@ fma_spectrograms/000005.npy
 fma_spectrograms/000006.npy
 fma_spectrograms/000007.npy
 fma_spectrograms/000008.npy
+
+# Ignore spectrograms and numpy files
+fma_spectrograms/
+*.npy
+
+fma_metadata.zip

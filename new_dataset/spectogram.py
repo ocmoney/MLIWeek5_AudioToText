@@ -24,8 +24,8 @@ mel_transform = torchaudio.transforms.MelSpectrogram(
 ).to(device)
 amp_to_db = torchaudio.transforms.AmplitudeToDB().to(device)
 
-segment_seconds = 3
-segment_samples = segment_seconds * sample_rate
+segment_seconds = 3  # (not used for slicing anymore)
+# segment_samples = segment_seconds * sample_rate  # (not used)
 
 first_five_specs = []
 count = 0
@@ -46,21 +46,16 @@ for root, dirs, files in os.walk(AUDIO_DIR):
             if waveform.shape[0] > 1:
                 waveform = waveform.mean(dim=0, keepdim=True)
             waveform = waveform.squeeze(0)  # [samples]
-            total_samples = waveform.shape[0]
-            num_segments = total_samples // segment_samples
-            for i in range(num_segments):
-                start = i * segment_samples
-                end = start + segment_samples
-                segment = waveform[start:end]
-                segment = segment.unsqueeze(0).to(device)
-                mel_spec = mel_transform(segment)
-                mel_spec_db = amp_to_db(mel_spec)
-                mel_spec_db = mel_spec_db.cpu().numpy()
-                out_path = os.path.join(OUTPUT_DIR, f"{file.replace('.mp3','')}_seg{i}.npy")
-                np.save(out_path, mel_spec_db)
-                if count < 5:
-                    first_five_specs.append(mel_spec_db)
-                    count += 1
+            # Compute mel spectrogram for the whole song
+            segment = waveform.unsqueeze(0).to(device)
+            mel_spec = mel_transform(segment)
+            mel_spec_db = amp_to_db(mel_spec)
+            mel_spec_db = mel_spec_db.cpu().numpy()
+            out_path = os.path.join(OUTPUT_DIR, f"{file.replace('.mp3','')}.npy")
+            np.save(out_path, mel_spec_db)
+            if count < 5:
+                first_five_specs.append(mel_spec_db)
+                count += 1
 
 print("\nFirst 5 spectrogram shapes:")
 for i, spec in enumerate(first_five_specs):

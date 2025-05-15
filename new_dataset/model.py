@@ -79,3 +79,21 @@ class SongClassifier(nn.Module):
         x = x.mean(dim=1)    # Global average pooling over sequence
         x = self.classifier(x)
         return x
+
+class SongEmbeddingNet(nn.Module):
+    def __init__(self, nhead=4, num_encoder_layers=4, dim_feedforward=1024, dropout=0.1, d_model=512):
+        super().__init__()
+        self.encoder = ConvEncoder(
+            input_channels=1,
+            conv_channels=256,
+            d_model=d_model,
+            nhead=nhead,
+            num_encoder_layers=num_encoder_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)  # [batch, seq_len, d_model]
+        x = x.mean(dim=1)    # Global average pooling over sequence
+        return x  # [batch, d_model]
