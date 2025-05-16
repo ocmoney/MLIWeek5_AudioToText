@@ -89,19 +89,33 @@ class GenreDataset(Dataset):
         # Get the specific slice
         spec_slice = spec[..., start_idx:start_idx+SLICE_FRAMES]
         
-        # Convert to tensor
-        spec_tensor = torch.from_numpy(spec_slice).float()
+        # Get the full song (downsampled to match slice length)
+        full_spec = spec[..., :spec.shape[-1]]
+        if full_spec.shape[-1] > SLICE_FRAMES:
+            # Downsample the full song to match slice length
+            # First convert to tensor and ensure correct shape
+            full_spec_tensor = torch.from_numpy(full_spec).float()  # [1, n_mels, time]
+            # Interpolate each mel bin independently
+            full_spec_tensor = torch.nn.functional.interpolate(
+                full_spec_tensor.unsqueeze(0),  # Add batch dim: [1, 1, n_mels, time]
+                size=(full_spec_tensor.shape[1], SLICE_FRAMES),  # Keep n_mels, resize time
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0)  # Remove batch dim: [1, n_mels, SLICE_FRAMES]
+            full_spec = full_spec_tensor.numpy()
+        
+        # Convert to tensors and ensure correct shape
+        slice_tensor = torch.from_numpy(spec_slice).float().squeeze(0)  # [n_mels, time]
+        full_tensor = torch.from_numpy(full_spec).float().squeeze(0)  # [n_mels, time]
         
         # Get genre index
         genre_idx = self.genre_to_idx[genre]
         
-        return spec_tensor, genre_idx
+        return slice_tensor, full_tensor, genre_idx
 
-class GenreEncoder(nn.Module):
-    def __init__(self, num_classes):
-        super(GenreEncoder, self).__init__()
-        
-        # 1D CNN layers
+class SliceEncoder(nn.Module):
+    def __init__(self):
+        super(SliceEncoder, self).__init__()
         self.conv_layers = nn.Sequential(
             # First conv block
             nn.Conv1d(N_MELS, 32, kernel_size=3, stride=1, padding=1),
@@ -120,38 +134,89 @@ class GenreEncoder(nn.Module):
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=2, stride=2),
+        )
+        
+        # Calculate the size of the flattened features
+        self._to_linear = None
+        x = torch.randn(1, N_MELS, SLICE_FRAMES)
+        x = self.conv_layers(x)
+        self._to_linear = x.shape[1] * x.shape[2]
+        
+        self.fc = nn.Linear(self._to_linear, 256)
+
+    def forward(self, x):
+        # Add batch dimension if not present
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
+
+class FullSongEncoder(nn.Module):
+    def __init__(self):
+        super(FullSongEncoder, self).__init__()
+        self.conv_layers = nn.Sequential(
+            # First conv block
+            nn.Conv1d(N_MELS, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
             
-            # Fourth conv block
-            nn.Conv1d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm1d(256),
+            # Second conv block
+            nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+            
+            # Third conv block
+            nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=2, stride=2),
         )
         
         # Calculate the size of the flattened features
         self._to_linear = None
-        
-        # Dummy forward pass to calculate the size
-        x = torch.randn(1, N_MELS, SLICE_FRAMES)  # [batch, n_mels, time]
+        x = torch.randn(1, N_MELS, SLICE_FRAMES)
         x = self.conv_layers(x)
         self._to_linear = x.shape[1] * x.shape[2]
         
-        # Fully connected layers
-        self.fc_layers = nn.Sequential(
-            nn.Linear(self._to_linear, 512),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(512, num_classes)
-        )
+        self.fc = nn.Linear(self._to_linear, 256)
 
     def forward(self, x):
-        # Input shape: [batch, channels, n_mels, time]
-        # Reshape to [batch, n_mels, time]
-        x = x.squeeze(1)  # Remove the channel dimension
+        # Add batch dimension if not present
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
         x = self.conv_layers(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.fc_layers(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
         return x
+
+class TwoTowerGenreEncoder(nn.Module):
+    def __init__(self, num_classes):
+        super(TwoTowerGenreEncoder, self).__init__()
+        self.slice_encoder = SliceEncoder()
+        self.full_encoder = FullSongEncoder()
+        
+        # Combined classifier
+        self.classifier = nn.Sequential(
+            nn.Linear(512, 256),  # 256 from each tower
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
+        )
+
+    def forward(self, slice_x, full_x):
+        # Get features from both towers
+        slice_emb = self.slice_encoder(slice_x)
+        full_emb = self.full_encoder(full_x)
+        
+        # Concatenate features
+        combined = torch.cat([slice_emb, full_emb], dim=1)
+        
+        # Classify
+        return self.classifier(combined)
 
 def train_model(model, train_loader, criterion, optimizer, device):
     model.train()
@@ -159,11 +224,13 @@ def train_model(model, train_loader, criterion, optimizer, device):
     correct = 0
     total = 0
     
-    for inputs, labels in tqdm(train_loader, desc="Training"):
-        inputs, labels = inputs.to(device), labels.to(device)
+    for slice_inputs, full_inputs, labels in tqdm(train_loader, desc="Training"):
+        slice_inputs = slice_inputs.to(device)
+        full_inputs = full_inputs.to(device)
+        labels = labels.to(device)
         
         optimizer.zero_grad()
-        outputs = model(inputs)
+        outputs = model(slice_inputs, full_inputs)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -188,9 +255,12 @@ def validate_model(model, val_loader, criterion, device, idx_to_genre):
     all_labels = []
     
     with torch.no_grad():
-        for inputs, labels in tqdm(val_loader, desc="Validating"):
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
+        for slice_inputs, full_inputs, labels in tqdm(val_loader, desc="Validating"):
+            slice_inputs = slice_inputs.to(device)
+            full_inputs = full_inputs.to(device)
+            labels = labels.to(device)
+            
+            outputs = model(slice_inputs, full_inputs)
             loss = criterion(outputs, labels)
             
             running_loss += loss.item()
@@ -260,7 +330,7 @@ def main():
     
     # Create model
     print("Creating model...")
-    model = GenreEncoder(dataset.num_classes).to(device)
+    model = TwoTowerGenreEncoder(dataset.num_classes).to(device)
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()

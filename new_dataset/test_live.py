@@ -3,7 +3,7 @@ import torchaudio
 import numpy as np
 import librosa
 import time
-from genre_encoder import GenreEncoder, SLICE_FRAMES, N_MELS, SAMPLE_RATE, HOP_LENGTH
+from genre_encoder import TwoTowerGenreEncoder, SLICE_FRAMES, N_MELS, SAMPLE_RATE, HOP_LENGTH
 import matplotlib.pyplot as plt
 import os
 
@@ -57,19 +57,44 @@ def prepare_inputs(audio, sample_rate=SAMPLE_RATE):
         pad_width = SLICE_FRAMES - mel_spec.shape[1]
         spec_slice = np.pad(mel_spec, ((0, 0), (0, pad_width)), mode='constant')
     
-    # Convert to tensor
-    spec_tensor = torch.from_numpy(spec_slice).float()
+    # Prepare full song (downsampled to match slice length)
+    if mel_spec.shape[1] > SLICE_FRAMES:
+        # Downsample the full song to match slice length
+        full_spec = torch.nn.functional.interpolate(
+            torch.from_numpy(mel_spec).float().unsqueeze(0).unsqueeze(0),
+            size=(mel_spec.shape[0], SLICE_FRAMES),
+            mode='bilinear',
+            align_corners=False
+        ).squeeze(0).squeeze(0).numpy()
+    else:
+        # Pad if shorter than 5 seconds
+        pad_width = SLICE_FRAMES - mel_spec.shape[1]
+        full_spec = np.pad(mel_spec, ((0, 0), (0, pad_width)), mode='constant')
     
-    return spec_tensor
+    # Convert to tensors
+    slice_tensor = torch.from_numpy(spec_slice).float()
+    full_tensor = torch.from_numpy(full_spec).float()
+    
+    return slice_tensor, full_tensor
 
-def plot_spectrogram(spec):
-    """Plot the spectrogram for visualization."""
-    plt.figure(figsize=(10, 4))
-    plt.imshow(spec, aspect='auto', origin='lower')
-    plt.title('Mel Spectrogram')
-    plt.ylabel('Mel Bins')
-    plt.xlabel('Time')
-    plt.colorbar()
+def plot_spectrograms(slice_spec, full_spec):
+    """Plot both spectrograms for visualization."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    
+    # Plot slice spectrogram
+    im1 = ax1.imshow(slice_spec, aspect='auto', origin='lower')
+    ax1.set_title('5-Second Slice Spectrogram')
+    ax1.set_ylabel('Mel Bins')
+    ax1.set_xlabel('Time')
+    plt.colorbar(im1, ax=ax1)
+    
+    # Plot full song spectrogram
+    im2 = ax2.imshow(full_spec, aspect='auto', origin='lower')
+    ax2.set_title('Full Song Spectrogram (Downsampled)')
+    ax2.set_ylabel('Mel Bins')
+    ax2.set_xlabel('Time')
+    plt.colorbar(im2, ax=ax2)
+    
     plt.tight_layout()
     plt.show()
 
@@ -80,7 +105,7 @@ def main():
     
     # Load model
     print("Loading model...")
-    model = GenreEncoder(num_classes=7)  # 7 genres excluding Pop
+    model = TwoTowerGenreEncoder(num_classes=7)  # 7 genres excluding Pop
     model.load_state_dict(torch.load("genre_classifier.pth")['model_state_dict'])
     model = model.to(device)
     model.eval()
@@ -106,17 +131,18 @@ def main():
                 continue
             
             # Prepare inputs
-            spec_tensor = prepare_inputs(audio)
+            slice_tensor, full_tensor = prepare_inputs(audio)
             
-            # Plot spectrogram
-            plot_spectrogram(spec_tensor.numpy())
+            # Plot spectrograms
+            plot_spectrograms(slice_tensor.numpy(), full_tensor.numpy())
             
-            # Move tensor to device
-            spec_tensor = spec_tensor.to(device)
+            # Move tensors to device
+            slice_tensor = slice_tensor.to(device)
+            full_tensor = full_tensor.to(device)
             
             # Get prediction
             with torch.no_grad():
-                outputs = model(spec_tensor.unsqueeze(0))
+                outputs = model(slice_tensor.unsqueeze(0), full_tensor.unsqueeze(0))
                 probabilities = torch.softmax(outputs, dim=1)
                 predicted_idx = outputs.argmax(dim=1).item()
                 confidence = probabilities[0][predicted_idx].item()
