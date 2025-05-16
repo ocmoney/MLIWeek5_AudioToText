@@ -21,12 +21,28 @@ N_MELS = 128
 SLICE_FRAMES = int((SLICE_SECONDS * SAMPLE_RATE) // HOP_LENGTH)
 MODEL_SAVE_PATH = "genre_classifier.pth"
 VAL_SPLIT = 0.2  # 20% of data for validation
+NOISE_LEVEL = 0.1  # Amount of noise to add (10% of signal)
+TEMPERATURE = 2.0  # Temperature scaling for model output
+
+def add_spectrogram_noise(spec):
+    """Add random noise to spectrogram."""
+    # Generate random noise with same shape as spectrogram
+    noise = np.random.normal(0, NOISE_LEVEL, spec.shape)
+    # Add noise to spectrogram
+    noisy_spec = spec + noise
+    # Clip values to maintain valid range [0, 1]
+    noisy_spec = np.clip(noisy_spec, 0, 1)
+    return noisy_spec
 
 class GenreDataset(Dataset):
-    def __init__(self, metadata_file):
+    def __init__(self, metadata_file, is_training=True):
+        # Load and shuffle the dataframe
         self.df = pd.read_csv(metadata_file)
         # Filter out Pop genre
         self.df = self.df[self.df['genre'] != 'Pop']
+        # Shuffle the dataframe
+        self.df = self.df.sample(frac=1, random_state=42).reset_index(drop=True)
+        
         self.spectrogram_paths = self.df['spectrogram_path'].tolist()
         self.genres = self.df['genre'].tolist()
         
@@ -48,14 +64,18 @@ class GenreDataset(Dataset):
             # Use half of the available slices
             num_slices_to_use = max(1, num_slices // 2)
             
-            # Calculate valid start indices
+            # Calculate all valid start indices
             valid_starts = []
-            for i in range(num_slices_to_use):
+            for i in range(num_slices):
                 start_idx = i * SLICE_FRAMES
                 if start_idx + SLICE_FRAMES <= time_dim:
                     valid_starts.append(start_idx)
             
-            # Add all valid slices for this song
+            # Randomly select slices
+            if len(valid_starts) > num_slices_to_use:
+                valid_starts = np.random.choice(valid_starts, num_slices_to_use, replace=False)
+            
+            # Add selected slices for this song
             for start_idx in valid_starts:
                 self.song_slices.append({
                     'path': spec_path,
@@ -102,7 +122,11 @@ class GenreDataset(Dataset):
                 mode='bilinear',
                 align_corners=False
             ).squeeze(0)  # Remove batch dim: [1, n_mels, SLICE_FRAMES]
-            full_spec = full_spec_tensor.numpy()
+            full_spec = full_spec_tensor.cpu().numpy()
+        
+        # Add noise to both slice and full song
+        spec_slice = add_spectrogram_noise(spec_slice)
+        full_spec = add_spectrogram_noise(full_spec)
         
         # Convert to tensors and ensure correct shape
         slice_tensor = torch.from_numpy(spec_slice).float().squeeze(0)  # [n_mels, time]
@@ -199,12 +223,15 @@ class TwoTowerGenreEncoder(nn.Module):
         self.slice_encoder = SliceEncoder()
         self.full_encoder = FullSongEncoder()
         
-        # Combined classifier
+        # Combined classifier with more regularization
         self.classifier = nn.Sequential(
             nn.Linear(512, 256),  # 256 from each tower
             nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Linear(256, num_classes)
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, num_classes)
         )
 
     def forward(self, slice_x, full_x):
@@ -216,7 +243,10 @@ class TwoTowerGenreEncoder(nn.Module):
         combined = torch.cat([slice_emb, full_emb], dim=1)
         
         # Classify
-        return self.classifier(combined)
+        logits = self.classifier(combined)
+        
+        # Apply temperature scaling
+        return logits / TEMPERATURE
 
 def train_model(model, train_loader, criterion, optimizer, device):
     model.train()
@@ -312,25 +342,30 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Create dataset and dataloader
+    # Create full dataset
     print("Loading dataset...")
-    dataset = GenreDataset("fma_metadata.csv")
+    full_dataset = GenreDataset("fma_metadata.csv")
     
-    # Split dataset into train and validation
-    val_size = int(len(dataset) * VAL_SPLIT)
-    train_size = len(dataset) - val_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    # Calculate split sizes
+    total_size = len(full_dataset)
+    val_size = int(total_size * VAL_SPLIT)
+    train_size = total_size - val_size
     
-    print(f"Total dataset size: {len(dataset)}")
+    # Create train and validation datasets
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    
+    print(f"\nDataset split:")
+    print(f"Total dataset size: {total_size}")
     print(f"Training set size: {len(train_dataset)}")
     print(f"Validation set size: {len(val_dataset)}")
     
+    # Create dataloaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
     
     # Create model
     print("Creating model...")
-    model = TwoTowerGenreEncoder(dataset.num_classes).to(device)
+    model = TwoTowerGenreEncoder(full_dataset.num_classes).to(device)
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
@@ -346,7 +381,7 @@ def main():
         
         # Validation
         val_loss, val_accuracy, genre_accuracy, cm = validate_model(
-            model, val_loader, criterion, device, dataset.idx_to_genre)
+            model, val_loader, criterion, device, full_dataset.idx_to_genre)
         
         print(f"\nEpoch {epoch+1}/{NUM_EPOCHS}")
         print(f"Training - Loss: {train_loss:.4f}, Accuracy: {train_accuracy:.2f}%")
@@ -361,7 +396,7 @@ def main():
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
             # Plot confusion matrix for best model
-            plot_confusion_matrix(cm, dataset.idx_to_genre)
+            plot_confusion_matrix(cm, full_dataset.idx_to_genre)
             
             torch.save({
                 'epoch': epoch,
@@ -371,7 +406,7 @@ def main():
                 'val_loss': val_loss,
                 'val_accuracy': val_accuracy,
                 'genre_accuracy': genre_accuracy,
-                'genre_mapping': dataset.genre_to_idx
+                'genre_mapping': full_dataset.genre_to_idx
             }, MODEL_SAVE_PATH)
             print(f"\nSaved new best model with validation accuracy: {val_accuracy:.2f}%")
         print()
