@@ -38,8 +38,6 @@ class GenreDataset(Dataset):
         
         # Precompute all valid slices for each song
         self.song_slices = []
-        self.song_to_slices = {}  # Map song paths to their slice indices
-        
         for spec_path, genre in zip(self.spectrogram_paths, self.genres):
             spec = np.load(spec_path)
             if spec.ndim == 2:
@@ -58,17 +56,12 @@ class GenreDataset(Dataset):
                     valid_starts.append(start_idx)
             
             # Add all valid slices for this song
-            song_slice_indices = []
             for start_idx in valid_starts:
-                slice_idx = len(self.song_slices)
                 self.song_slices.append({
                     'path': spec_path,
                     'start_idx': start_idx,
                     'genre': genre
                 })
-                song_slice_indices.append(slice_idx)
-            
-            self.song_to_slices[spec_path] = song_slice_indices
         
         print(f"Found {len(unique_genres)} unique genres (excluding Pop)")
         print("Genre mapping:", self.genre_to_idx)
@@ -96,36 +89,19 @@ class GenreDataset(Dataset):
         # Get the specific slice
         spec_slice = spec[..., start_idx:start_idx+SLICE_FRAMES]
         
-        # Get all slices from the same song
-        song_slice_indices = self.song_to_slices[spec_path]
-        other_slice_indices = [i for i in song_slice_indices if i != idx]
-        
-        # If there are other slices, randomly select one
-        if other_slice_indices:
-            other_idx = np.random.choice(other_slice_indices)
-            other_slice_info = self.song_slices[other_idx]
-            other_spec = np.load(other_slice_info['path'])
-            if other_spec.ndim == 2:
-                other_spec = np.expand_dims(other_spec, 0)
-            other_slice = other_spec[..., other_slice_info['start_idx']:other_slice_info['start_idx']+SLICE_FRAMES]
-        else:
-            # If no other slices, duplicate the current slice
-            other_slice = spec_slice.copy()
-        
-        # Convert to tensors
+        # Convert to tensor
         spec_tensor = torch.from_numpy(spec_slice).float()
-        other_slice_tensor = torch.from_numpy(other_slice).float()
         
         # Get genre index
         genre_idx = self.genre_to_idx[genre]
         
-        return spec_tensor, other_slice_tensor, genre_idx
+        return spec_tensor, genre_idx
 
-class SliceEncoder(nn.Module):
-    def __init__(self):
-        super(SliceEncoder, self).__init__()
+class GenreEncoder(nn.Module):
+    def __init__(self, num_classes):
+        super(GenreEncoder, self).__init__()
         
-        # 1D CNN layers for processing individual slices
+        # 1D CNN layers
         self.conv_layers = nn.Sequential(
             # First conv block
             nn.Conv1d(N_MELS, 32, kernel_size=3, stride=1, padding=1),
@@ -154,56 +130,28 @@ class SliceEncoder(nn.Module):
         
         # Calculate the size of the flattened features
         self._to_linear = None
-        x = torch.randn(1, N_MELS, SLICE_FRAMES)
+        
+        # Dummy forward pass to calculate the size
+        x = torch.randn(1, N_MELS, SLICE_FRAMES)  # [batch, n_mels, time]
         x = self.conv_layers(x)
         self._to_linear = x.shape[1] * x.shape[2]
         
-        # Projection layer
-        self.projection = nn.Linear(self._to_linear, 512)
-
-    def forward(self, x):
-        x = self.conv_layers(x)
-        x = x.view(x.size(0), -1)
-        x = self.projection(x)
-        return x
-
-class GenreEncoder(nn.Module):
-    def __init__(self, num_classes):
-        super(GenreEncoder, self).__init__()
-        
-        # Two slice encoders
-        self.slice_encoder1 = SliceEncoder()
-        self.slice_encoder2 = SliceEncoder()
-        
-        # Attention mechanism for combining slice features
-        self.attention = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.Tanh(),
-            nn.Linear(256, 1)
-        )
-        
-        # Final classification layers
-        self.classifier = nn.Sequential(
-            nn.Linear(512, 256),
+        # Fully connected layers
+        self.fc_layers = nn.Sequential(
+            nn.Linear(self._to_linear, 512),
             nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Linear(256, num_classes)
+            nn.Linear(512, num_classes)
         )
 
-    def forward(self, x1, x2):
-        # Encode both slices
-        h1 = self.slice_encoder1(x1)
-        h2 = self.slice_encoder2(x2)
-        
-        # Combine features using attention
-        combined = torch.stack([h1, h2], dim=1)  # [batch, 2, 512]
-        attention_weights = self.attention(combined)  # [batch, 2, 1]
-        attention_weights = torch.softmax(attention_weights, dim=1)
-        weighted_features = torch.sum(combined * attention_weights, dim=1)  # [batch, 512]
-        
-        # Classify
-        output = self.classifier(weighted_features)
-        return output
+    def forward(self, x):
+        # Input shape: [batch, channels, n_mels, time]
+        # Reshape to [batch, n_mels, time]
+        x = x.squeeze(1)  # Remove the channel dimension
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.fc_layers(x)
+        return x
 
 def train_model(model, train_loader, criterion, optimizer, device):
     model.train()
@@ -211,11 +159,11 @@ def train_model(model, train_loader, criterion, optimizer, device):
     correct = 0
     total = 0
     
-    for inputs1, inputs2, labels in tqdm(train_loader, desc="Training"):
-        inputs1, inputs2, labels = inputs1.to(device), inputs2.to(device), labels.to(device)
+    for inputs, labels in tqdm(train_loader, desc="Training"):
+        inputs, labels = inputs.to(device), labels.to(device)
         
         optimizer.zero_grad()
-        outputs = model(inputs1, inputs2)
+        outputs = model(inputs)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -240,9 +188,9 @@ def validate_model(model, val_loader, criterion, device, idx_to_genre):
     all_labels = []
     
     with torch.no_grad():
-        for inputs1, inputs2, labels in tqdm(val_loader, desc="Validating"):
-            inputs1, inputs2, labels = inputs1.to(device), inputs2.to(device), labels.to(device)
-            outputs = model(inputs1, inputs2)
+        for inputs, labels in tqdm(val_loader, desc="Validating"):
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
             loss = criterion(outputs, labels)
             
             running_loss += loss.item()
