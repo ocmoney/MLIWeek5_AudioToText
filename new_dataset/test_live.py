@@ -6,6 +6,11 @@ import time
 from genre_encoder import TwoTowerGenreEncoder, SLICE_FRAMES, N_MELS, SAMPLE_RATE, HOP_LENGTH, add_spectrogram_noise
 import matplotlib.pyplot as plt
 import os
+import pyaudio
+
+# Audio recording constants
+CHUNK = 1024  # Number of frames per buffer
+RECORD_SECONDS = 5  # Duration of each recording
 
 def load_audio_file(file_path):
     """Load audio from a file."""
@@ -142,23 +147,18 @@ def main():
     
     # Load model
     print("Loading model...")
-    model = TwoTowerGenreEncoder(num_classes=7)  # 7 genres excluding Pop
+    # Initialize model with 7 classes (excluding Experimental)
+    model = TwoTowerGenreEncoder(num_classes=7).to(device)
     checkpoint = torch.load("genre_classifier.pth")
     model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
     model.eval()
     
-    # Load genre mapping
+    # Get genre mapping from checkpoint
     genre_mapping = checkpoint['genre_mapping']
     idx_to_genre = {v: k for k, v in genre_mapping.items()}
     
-    # Print validation accuracy from training
-    if 'val_accuracy' in checkpoint:
-        print(f"\nModel validation accuracy during training: {checkpoint['val_accuracy']:.2f}%")
-    if 'genre_accuracy' in checkpoint:
-        print("\nPer-genre validation accuracy during training:")
-        for genre, acc in checkpoint['genre_accuracy'].items():
-            print(f"{genre}: {acc:.2f}%")
+    print("Model loaded successfully")
+    print("Genre mapping:", genre_mapping)
     
     while True:
         try:

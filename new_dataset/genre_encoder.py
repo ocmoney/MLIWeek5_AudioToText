@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 # Configuration
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-3
-NUM_EPOCHS = 20
+NUM_EPOCHS = 10
 SLICE_SECONDS = 5
 SAMPLE_RATE = 22050
 HOP_LENGTH = 512
@@ -39,7 +39,7 @@ class GenreDataset(Dataset):
         # Load and shuffle the dataframe
         self.df = pd.read_csv(metadata_file)
         # Filter out Pop genre
-        self.df = self.df[self.df['genre'] != 'Pop']
+        self.df = self.df[self.df['genre'] != 'Experimental']
         # Shuffle the dataframe
         self.df = self.df.sample(frac=1, random_state=42).reset_index(drop=True)
         
@@ -124,9 +124,8 @@ class GenreDataset(Dataset):
             ).squeeze(0)  # Remove batch dim: [1, n_mels, SLICE_FRAMES]
             full_spec = full_spec_tensor.cpu().numpy()
         
-        # Add noise to both slice and full song
+        # Add noise only to the slice (not to full song)
         spec_slice = add_spectrogram_noise(spec_slice)
-        full_spec = add_spectrogram_noise(full_spec)
         
         # Convert to tensors and ensure correct shape
         slice_tensor = torch.from_numpy(spec_slice).float().squeeze(0)  # [n_mels, time]
